@@ -106,6 +106,12 @@ header.top{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:12p
 .tools button{border:0;background:none;font-size:16px;padding:2px 4px}
 .tools input{width:90px;accent-color:var(--pink)}
 @media (hover:none){.tools{opacity:1}}
+.screen-tile.fake-fs{position:fixed;inset:0;z-index:100;border-radius:0;border:0;height:100dvh;width:100vw;cursor:default;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+.screen-tile.fake-fs .tools{opacity:1;bottom:calc(14px + env(safe-area-inset-bottom));right:calc(10px + env(safe-area-inset-right))}
+.screen-tile.fake-fs .label{bottom:calc(14px + env(safe-area-inset-bottom));left:calc(10px + env(safe-area-inset-left))}
+.screen-tile.fake-fs .stats{top:calc(10px + env(safe-area-inset-top));right:calc(10px + env(safe-area-inset-right))}
+.fs-exit{position:absolute;left:calc(10px + env(safe-area-inset-left));top:calc(10px + env(safe-area-inset-top));width:40px;height:40px;border-radius:50%;border:0;background:rgba(20,14,38,.75);color:#fff;font-size:18px;font-weight:800;z-index:2;backdrop-filter:blur(6px)}
+body.has-fake-fs .controls,body.has-fake-fs header.top,body.has-fake-fs aside.chat{visibility:hidden}
 
 /* ---------- controls ---------- */
 .controls{grid-column:1;display:flex;gap:10px;justify-content:center;align-items:center;padding:12px 16px 16px;flex-wrap:wrap;position:relative}
@@ -800,17 +806,39 @@ function updateTile(p){
   t.querySelector('.mic').textContent = p.mic ? '🎙️' : '🔇';
   t._muted = !p.mic;
 }
+const IS_IPHONE = /iPhone|iPod/.test(navigator.userAgent);
+function setFakeFs(el, on){
+  el.classList.toggle('fake-fs', on);
+  document.body.classList.toggle('has-fake-fs', on);
+  const x = el.querySelector('.fs-exit'); if (x) x.classList.toggle('hidden', !on);
+  if (on) window.scrollTo(0, 0);
+}
+addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.fake-fs').forEach(t => setFakeFs(t, false)); });
 function makeScreenTile(name, self){
   const el = document.createElement('div');
   el.className = 'tile screen-tile';
   el.innerHTML = `<video playsinline autoplay></video><div class="label">🖥️ <span class="nm"></span></div><div class="stats"></div>
-    <div class="tools">${self ? '' : '<span>🔊</span><input type="range" min="0" max="1" step="0.05" value="1" title="Volume">'}<button title="Fullscreen">⛶</button></div>`;
+    <button class="fs-exit hidden" title="Exit fullscreen">✕</button>
+    <div class="tools">${self ? '' : '<span>🔊</span><input type="range" min="0" max="1" step="0.05" value="1" title="Volume">'}<button class="fs-btn" title="Fullscreen">⛶</button></div>`;
   el.querySelector('.nm').textContent = self ? "your screen" : `${name}'s screen`;
   const v = el.querySelector('video');
   const vol = el.querySelector('input'); if (vol) { vol.oninput = () => setVol(v, +vol.value); vol.onclick = e => e.stopPropagation(); }
-  el.querySelector('.tools button').onclick = e => {
+  el.querySelector('.fs-exit').onclick = e => { e.stopPropagation(); setFakeFs(el, false); };
+  el.querySelector('.fs-btn').onclick = e => {
     e.stopPropagation();
-    if (document.fullscreenElement) document.exitFullscreen(); else (el.requestFullscreen ? el.requestFullscreen() : v.webkitEnterFullscreen && v.webkitEnterFullscreen());
+    const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+    if (fsEl()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
+    if (el.classList.contains('fake-fs')) { setFakeFs(el, false); return; }
+    // iPhone: never use Safari's own video player (it freezes in landscape and has pause/skip).
+    // Fill the page ourselves instead. Other devices use normal fullscreen.
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    const canReal = !IS_IPHONE && req && (document.fullscreenEnabled || document.webkitFullscreenEnabled);
+    if (!canReal) { setFakeFs(el, true); return; }
+    try {
+      const r = req.call(el);
+      if (r && r.catch) r.catch(() => setFakeFs(el, true));
+    } catch { setFakeFs(el, true); return; }
+    setTimeout(() => { if (!fsEl()) setFakeFs(el, true); }, 400);
   };
   el.querySelector('.tools').onclick = e => e.stopPropagation();
   el.onclick = () => {
@@ -819,7 +847,7 @@ function makeScreenTile(name, self){
     if (!was && screensEl.children.length > 1) el.classList.add('focus');
     screensEl.classList.toggle('focused', !was && screensEl.children.length > 1);
   };
-  el.ondblclick = e => { e.stopPropagation(); el.querySelector('.tools button').click(); };
+  el.ondblclick = e => { e.stopPropagation(); el.querySelector('.fs-btn').click(); };
   screensEl.appendChild(el);
   return el;
 }
@@ -846,6 +874,7 @@ function dropIn(p, kind){
 function layout(){
   const n = screensEl.children.length;
   stage.classList.toggle('has-screen', n > 0);
+  if (!document.querySelector('.fake-fs')) document.body.classList.remove('has-fake-fs');
   if (!screensEl.querySelector('.focus')) screensEl.classList.remove('focused');
   if (n <= 1) { screensEl.classList.remove('focused'); screensEl.querySelectorAll('.focus').forEach(t => t.classList.remove('focus')); }
 }
