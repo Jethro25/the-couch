@@ -758,12 +758,10 @@ function updateTile(p){
   t._muted = !p.mic;
 }
 const IS_IPHONE = /iPhone|iPod/.test(navigator.userAgent);
-const STANDALONE = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
-function tipHomeScreen(){
-  if (store.get('couch-hs-tip')) return;
-  store.set('couch-hs-tip', '1');
-  setTimeout(() => toast('Tip: Share → "Add to Home Screen" opens the couch as an app with clean fullscreen 📱'), 600);
-}
+// Rotating a phone can stall a live video on iOS; nudge every video back to playing.
+const kickVideos = () => document.querySelectorAll('video').forEach(v => { if (v.srcObject) v.play().catch(() => {}); });
+addEventListener('orientationchange', () => { kickVideos(); setTimeout(kickVideos, 400); setTimeout(kickVideos, 1200); });
+addEventListener('resize', () => setTimeout(kickVideos, 300));
 function setFakeFs(el, on){
   el.classList.toggle('fake-fs', on);
   document.body.classList.toggle('has-fake-fs', on);
@@ -788,11 +786,6 @@ function makeScreenTile(name, self){
     const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
     if (fsEl()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
     if (el.classList.contains('fake-fs')) { setFakeFs(el, false); return; }
-    // iPhone in Safari: only the native video player can hide Safari's bars. Its pause/skip
-    // buttons can't be removed, but keepLive() snaps the picture straight back to live.
-    if (IS_IPHONE && !STANDALONE && v.webkitEnterFullscreen) {
-      try { v.webkitEnterFullscreen(); tipHomeScreen(); return; } catch {}
-    }
     const req = el.requestFullscreen || el.webkitRequestFullscreen;
     const canReal = (document.fullscreenEnabled || document.webkitFullscreenEnabled) && req && !IS_IPHONE;
     if (!canReal) { setFakeFs(el, true); return; }
