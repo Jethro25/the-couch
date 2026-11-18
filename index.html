@@ -6,6 +6,13 @@
 <title>The Couch</title>
 <meta name="description" content="Hop on the couch: share screens, talk, and hang out with your friends.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛋️</text></svg>">
+<meta name="theme-color" content="#1a1430">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="The Couch">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
@@ -62,7 +69,7 @@ input.txt:focus{border-color:var(--lilac)}
 /* ---------- room ---------- */
 #room{position:relative;z-index:1;height:100%;display:grid;grid-template-columns:1fr 340px;grid-template-rows:auto 1fr auto}
 #room.chat-closed{grid-template-columns:1fr 0}
-header.top{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:blur(10px);min-width:0}
+header.top{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:calc(12px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) 12px calc(16px + env(safe-area-inset-left));border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:blur(10px);min-width:0}
 .brand{font-family:Fredoka;font-weight:700;font-size:20px;white-space:nowrap}
 .code{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:6px 8px 6px 14px;min-width:0}
 .code b{font-family:Fredoka;font-weight:600;color:var(--sun);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -108,7 +115,7 @@ video::-webkit-media-controls{display:none!important}
 video::-webkit-media-controls-start-playback-button{display:none!important}
 
 /* ---------- controls ---------- */
-.controls{grid-column:1;display:flex;gap:10px;justify-content:center;align-items:center;padding:12px 16px 16px;flex-wrap:wrap;position:relative}
+.controls{grid-column:1;display:flex;gap:10px;justify-content:center;align-items:center;padding:12px 16px calc(16px + env(safe-area-inset-bottom));flex-wrap:wrap;position:relative}
 .ctl{display:flex;align-items:center;gap:8px;border:2px solid var(--line);background:var(--surface);border-radius:18px;padding:11px 16px;font-weight:800;font-size:15px;transition:transform .12s,background .12s,border-color .12s;white-space:nowrap}
 .ctl:hover{transform:translateY(-2px);border-color:var(--lilac)}
 .ctl .e{font-size:19px;line-height:1}
@@ -750,6 +757,13 @@ function updateTile(p){
   t.querySelector('.mic').textContent = p.mic ? '🎙️' : '🔇';
   t._muted = !p.mic;
 }
+const IS_IPHONE = /iPhone|iPod/.test(navigator.userAgent);
+const STANDALONE = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+function tipHomeScreen(){
+  if (store.get('couch-hs-tip')) return;
+  store.set('couch-hs-tip', '1');
+  setTimeout(() => toast('Tip: Share → "Add to Home Screen" opens the couch as an app with clean fullscreen 📱'), 600);
+}
 function setFakeFs(el, on){
   el.classList.toggle('fake-fs', on);
   document.body.classList.toggle('has-fake-fs', on);
@@ -774,8 +788,13 @@ function makeScreenTile(name, self){
     const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
     if (fsEl()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
     if (el.classList.contains('fake-fs')) { setFakeFs(el, false); return; }
+    // iPhone in Safari: only the native video player can hide Safari's bars. Its pause/skip
+    // buttons can't be removed, but keepLive() snaps the picture straight back to live.
+    if (IS_IPHONE && !STANDALONE && v.webkitEnterFullscreen) {
+      try { v.webkitEnterFullscreen(); tipHomeScreen(); return; } catch {}
+    }
     const req = el.requestFullscreen || el.webkitRequestFullscreen;
-    const canReal = (document.fullscreenEnabled || document.webkitFullscreenEnabled) && req && !/iPhone|iPod/.test(navigator.userAgent);
+    const canReal = (document.fullscreenEnabled || document.webkitFullscreenEnabled) && req && !IS_IPHONE;
     if (!canReal) { setFakeFs(el, true); return; }
     try {
       const r = req.call(el);
@@ -804,6 +823,7 @@ function keepLive(v){
   v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', '');
   const resume = () => { if (v.srcObject && v.isConnected) setTimeout(() => v.play().catch(() => {}), 60); };
   v.addEventListener('pause', resume);
+  v.addEventListener('webkitbeginfullscreen', resume);
   v.addEventListener('webkitendfullscreen', resume);
   v.addEventListener('seeking', resume);
 }
