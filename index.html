@@ -98,6 +98,10 @@ header.top{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:12p
 .tools button{border:0;background:none;font-size:16px;padding:2px 4px}
 .tools input{width:90px;accent-color:var(--pink)}
 @media (hover:none){.tools{opacity:1}}
+.screen-tile.fake-fs{position:fixed;inset:0;z-index:100;border-radius:0;border:0;height:100dvh;width:100vw;cursor:default;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+.screen-tile.fake-fs .tools{opacity:1;bottom:calc(14px + env(safe-area-inset-bottom))}
+video::-webkit-media-controls{display:none!important}
+video::-webkit-media-controls-start-playback-button{display:none!important}
 
 /* ---------- controls ---------- */
 .controls{grid-column:1;display:flex;gap:10px;justify-content:center;align-items:center;padding:12px 16px 16px;flex-wrap:wrap;position:relative}
@@ -723,6 +727,7 @@ function personTile(name, color, self){
   el.className = 'tile person' + (self ? ' self' : '');
   el.innerHTML = '<video playsinline autoplay></video><div class="avatar"><span></span></div><div class="label"><span class="mic">🔇</span><span class="nm"></span></div>';
   if (self) el.querySelector('video').muted = true;
+  keepLive(el.querySelector('video'));
   setTileName(el, name, color);
   peopleEl.appendChild(el);
   return el;
@@ -749,9 +754,17 @@ function makeScreenTile(name, self){
   el.querySelector('.nm').textContent = self ? "your screen" : `${name}'s screen`;
   const v = el.querySelector('video');
   const vol = el.querySelector('input'); if (vol) { vol.oninput = () => { v.volume = +vol.value; }; vol.onclick = e => e.stopPropagation(); }
+  keepLive(v);
   el.querySelector('.tools button').onclick = e => {
     e.stopPropagation();
-    if (document.fullscreenElement) document.exitFullscreen(); else (el.requestFullscreen ? el.requestFullscreen() : v.webkitEnterFullscreen && v.webkitEnterFullscreen());
+    // Element fullscreen keeps our own (pause-free) UI. iPhone has no element fullscreen,
+    // so use an in-page fullscreen instead of Safari's native player, which has pause + scrub.
+    const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    if (fsEl) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
+    if (el.classList.contains('fake-fs')) { el.classList.remove('fake-fs'); return; }
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) { try { const r = req.call(el); if (r && r.catch) r.catch(() => el.classList.add('fake-fs')); return; } catch {} }
+    el.classList.add('fake-fs');
   };
   el.querySelector('.tools').onclick = e => e.stopPropagation();
   el.onclick = () => {
@@ -764,6 +777,25 @@ function makeScreenTile(name, self){
   screensEl.appendChild(el);
   return el;
 }
+// Live video can't be paused by viewers: if anything pauses it (iOS player, PiP,
+// backgrounding the app), jump straight back to the live picture.
+function keepLive(v){
+  if (v._live) return; v._live = true;
+  v.disablePictureInPicture = true;
+  v.setAttribute('disablepictureinpicture', '');
+  v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', '');
+  const resume = () => { if (v.srcObject && v.isConnected) setTimeout(() => v.play().catch(() => {}), 60); };
+  v.addEventListener('pause', resume);
+  v.addEventListener('webkitendfullscreen', resume);
+  v.addEventListener('seeking', resume);
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  S.ac && S.ac.state === 'suspended' && S.ac.resume().catch(() => {});
+  document.querySelectorAll('video').forEach(v => { if (v.srcObject && v.paused) v.play().catch(() => {}); });
+});
+addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.fake-fs').forEach(t => t.classList.remove('fake-fs')); });
+
 function attachIn(p, kind, stream){
   if (kind === 'av') {
     const t = ensureTile(p);
