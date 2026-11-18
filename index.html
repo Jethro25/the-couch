@@ -86,6 +86,14 @@ header.top{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:12p
 .tile.cam-on .avatar{display:none}
 .avatar span{width:clamp(44px,32%,96px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;font-family:Fredoka;font-weight:700;font-size:clamp(20px,4vw,38px);color:#21163f;box-shadow:0 6px 20px rgba(0,0,0,.3)}
 .stage.has-screen .people .avatar span{width:48px;font-size:22px}
+.vol{position:absolute;right:8px;top:8px;display:flex;align-items:center;gap:4px;background:rgba(20,14,38,.75);padding:3px 8px 3px 4px;border-radius:999px;backdrop-filter:blur(6px);z-index:2;opacity:0;transition:opacity .15s}
+.tile.person:hover .vol,.vol:focus-within,.vol.muted{opacity:1}
+@media (hover:none){.vol{opacity:1}}
+.vol .vbtn{border:0;background:none;font-size:15px;padding:2px 4px;line-height:1}
+.vol input{width:72px;accent-color:var(--mint)}
+.vol .vpct{font-size:11px;font-weight:800;color:var(--muted);min-width:30px;text-align:right;font-variant-numeric:tabular-nums}
+.stage.has-screen .people .vol input{width:52px}
+.stage.has-screen .people .vol .vpct{display:none}
 .label{position:absolute;left:10px;bottom:10px;display:flex;gap:6px;align-items:center;max-width:calc(100% - 20px);background:rgba(20,14,38,.72);padding:4px 10px;border-radius:999px;font-weight:700;font-size:14px;backdrop-filter:blur(6px)}
 .label .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
@@ -720,8 +728,10 @@ const peopleEl = $('#people'), screensEl = $('#screens'), stage = $('#stage');
 function personTile(name, color, self){
   const el = document.createElement('div');
   el.className = 'tile person' + (self ? ' self' : '');
-  el.innerHTML = '<video playsinline autoplay></video><div class="avatar"><span></span></div><div class="label"><span class="mic">🔇</span><span class="nm"></span></div>';
+  el.innerHTML = '<video playsinline autoplay></video><div class="avatar"><span></span></div><div class="label"><span class="mic">🔇</span><span class="nm"></span></div>' +
+    (self ? '' : '<div class="vol"><button class="vbtn" title="Mute for me">🔊</button><input type="range" min="0" max="1" step="0.05" value="1" title="Volume (only for you)"><span class="vpct">100%</span></div>');
   if (self) el.querySelector('video').muted = true;
+  else wireVolume(el, el.querySelector('video'));
   setTileName(el, name, color);
   peopleEl.appendChild(el);
   return el;
@@ -732,10 +742,60 @@ function setTileName(el, name, color){
   a.textContent = (name.trim()[0] || '?').toUpperCase();
   a.style.background = color;
 }
+// ---- per-person volume (only affects what YOU hear) ----
+// Most browsers let us set video.volume. iPhone ignores it, so there we route the
+// sound through Web Audio and turn a gain knob instead.
+const VOLUME_WORKS = (() => { try { const a = document.createElement('audio'); a.volume = 0.5; return a.volume === 0.5; } catch { return false; } })();
+function setVol(v, val){
+  v._vol = val;
+  if (VOLUME_WORKS) { v.volume = val; return; }
+  if (!S.ac || !v.srcObject || !v.srcObject.getAudioTracks().length) return;
+  if (!v._gain || v._gainStream !== v.srcObject) {
+    try { v._gsrc && v._gsrc.disconnect(); } catch {}
+    try {
+      const src = S.ac.createMediaStreamSource(v.srcObject), g = S.ac.createGain();
+      src.connect(g).connect(S.ac.destination);
+      v._gsrc = src; v._gain = g; v._gainStream = v.srcObject;
+      v.muted = true; // sound now comes through the gain node
+    } catch (e) { console.warn(e); return; }
+  }
+  v._gain.gain.value = val;
+}
+function reapplyVol(v){ if (v._gain || (v._vol !== undefined && v._vol !== 1)) setVol(v, v._vol === undefined ? 1 : v._vol); }
+function wireVolume(el, v){
+  const box = el.querySelector('.vol'), r = box.querySelector('input'), btn = box.querySelector('.vbtn'), pct = box.querySelector('.vpct');
+  let before = 1;
+  const show = val => {
+    r.value = val; pct.textContent = Math.round(val * 100) + '%';
+    btn.textContent = val === 0 ? '🔇' : val < 0.5 ? '🔉' : '🔊';
+    box.classList.toggle('muted', val === 0);
+  };
+  const apply = val => {
+    setVol(v, val); show(val);
+    if (el._volKey) store.set(el._volKey, String(val));
+  };
+  r.oninput = () => apply(+r.value);
+  btn.onclick = e => { e.stopPropagation(); if (+r.value > 0) { before = +r.value; apply(0); } else apply(before || 1); };
+  box.onclick = e => e.stopPropagation();
+  box.addEventListener('pointerdown', e => e.stopPropagation());
+  el._applyVol = apply;
+  el._showVol = show;
+}
+// Remember volume per friend's name, so a loud friend stays turned down next time.
+function restoreVol(tile, name){
+  if (!tile._applyVol) return;
+  const key = 'couch-vol:' + name.toLowerCase();
+  if (tile._volKey === key) return;
+  tile._volKey = key;
+  const saved = parseFloat(store.get(key));
+  if (!isNaN(saved) && saved >= 0 && saved <= 1) tile._applyVol(saved);
+}
+
 function ensureTile(p){ if (!p.tile) p.tile = personTile(p.name, p.color, false); return p.tile; }
 function updateTile(p){
   const t = ensureTile(p);
   setTileName(t, p.name, p.color);
+  if (p.hello) restoreVol(t, p.name);
   t.classList.toggle('cam-on', p.cam);
   t.querySelector('.mic').textContent = p.mic ? '🎙️' : '🔇';
   t._muted = !p.mic;
@@ -747,7 +807,7 @@ function makeScreenTile(name, self){
     <div class="tools">${self ? '' : '<span>🔊</span><input type="range" min="0" max="1" step="0.05" value="1" title="Volume">'}<button title="Fullscreen">⛶</button></div>`;
   el.querySelector('.nm').textContent = self ? "your screen" : `${name}'s screen`;
   const v = el.querySelector('video');
-  const vol = el.querySelector('input'); if (vol) { vol.oninput = () => { v.volume = +vol.value; }; vol.onclick = e => e.stopPropagation(); }
+  const vol = el.querySelector('input'); if (vol) { vol.oninput = () => setVol(v, +vol.value); vol.onclick = e => e.stopPropagation(); }
   el.querySelector('.tools button').onclick = e => {
     e.stopPropagation();
     if (document.fullscreenElement) document.exitFullscreen(); else (el.requestFullscreen ? el.requestFullscreen() : v.webkitEnterFullscreen && v.webkitEnterFullscreen());
@@ -767,11 +827,11 @@ function attachIn(p, kind, stream){
   if (kind === 'av') {
     const t = ensureTile(p);
     const v = t.querySelector('video');
-    if (v.srcObject !== stream) { v.srcObject = stream; playOrGate(v); watchLevel(stream, t); }
+    if (v.srcObject !== stream) { v.srcObject = stream; reapplyVol(v); playOrGate(v); watchLevel(stream, t); }
   } else {
     if (!p.screenTile) { p.screenTile = makeScreenTile(p.name, false); blip(990); }
     const v = p.screenTile.querySelector('video');
-    if (v.srcObject !== stream) { v.srcObject = stream; playOrGate(v); }
+    if (v.srcObject !== stream) { v.srcObject = stream; reapplyVol(v); playOrGate(v); }
     p.screenTile.querySelector('.nm').textContent = `${p.name}'s screen`;
     layout();
   }
@@ -804,7 +864,7 @@ function playOrGate(v){
 function unlockSound(){
   S.ac && S.ac.state === 'suspended' && S.ac.resume().catch(() => {});
   document.querySelectorAll('video').forEach(v => {
-    if (v._needsSound) { v._needsSound = false; v.muted = false; }
+    if (v._needsSound) { v._needsSound = false; if (!v._gain) v.muted = false; }
     if (v.srcObject && v.paused) v.play().catch(() => {});
   });
 }
