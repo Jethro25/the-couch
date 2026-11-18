@@ -599,10 +599,10 @@ function swapOut(kind, track){
 }
 
 // Raise bitrate ceilings so screen shares can reach full quality.
-// iPhones ask senders for H.264: it's hardware-decoded on iPhone and is what Safari's
-// fullscreen player is built for (VP8 is decoded in software there). Other devices keep VP8.
-// Add ?codec=h264 to the URL to force it on any device (for testing).
-const USE_H264 = /iPhone|iPod/.test(navigator.userAgent) || new URLSearchParams(location.search).get('codec') === 'h264';
+// Every viewer asks for H.264: hardware-decoded on nearly all phones and computers, and what
+// iPhone's fullscreen player is built for. If a device can't do H.264 it falls back to VP8
+// automatically. Add ?codec=vp8 to the URL to opt out (for testing).
+const USE_H264 = new URLSearchParams(location.search).get('codec') !== 'vp8';
 function preferH264(sdp){
   const lines = sdp.split('\r\n');
   const mi = lines.findIndex(l => l.startsWith('m=video'));
