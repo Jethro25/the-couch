@@ -573,7 +573,10 @@ function callPeer(id, kind){
 function onCall(call){
   const kind = call.metadata && call.metadata.kind === 'screen' ? 'screen' : 'av';
   const p = getPeer(call.peer);
-  call.answer(undefined, { sdpTransform: kind === 'screen' ? sdpScreen : undefined });
+  call.answer(undefined, { sdpTransform: sdp => {
+    if (kind === 'screen') sdp = sdpScreen(sdp);
+    return USE_H264 ? preferH264(sdp) : sdp;
+  } });
   call.on('stream', s => {
     const old = p.in[kind];
     p.in[kind] = call;
@@ -596,6 +599,27 @@ function swapOut(kind, track){
 }
 
 // Raise bitrate ceilings so screen shares can reach full quality.
+// iPhones ask senders for H.264: it's hardware-decoded on iPhone and is what Safari's
+// fullscreen player is built for (VP8 is decoded in software there). Other devices keep VP8.
+// Add ?codec=h264 to the URL to force it on any device (for testing).
+const USE_H264 = /iPhone|iPod/.test(navigator.userAgent) || new URLSearchParams(location.search).get('codec') === 'h264';
+function preferH264(sdp){
+  const lines = sdp.split('\r\n');
+  const mi = lines.findIndex(l => l.startsWith('m=video'));
+  if (mi < 0) return sdp;
+  const h264 = [], rtxFor = {};
+  lines.forEach(l => {
+    let m = l.match(/^a=rtpmap:(\d+) H264\//i); if (m) h264.push(m[1]);
+    m = l.match(/^a=fmtp:(\d+) apt=(\d+)/); if (m) (rtxFor[m[2]] = rtxFor[m[2]] || []).push(m[1]);
+  });
+  if (!h264.length) return sdp;
+  const pm1 = h264.filter(pt => lines.some(l => l.startsWith(`a=fmtp:${pt} `) && /packetization-mode=1/.test(l)));
+  const parts = lines[mi].split(' '), head = parts.slice(0, 3), pts = parts.slice(3);
+  const front = [];
+  (pm1.length ? pm1 : h264).forEach(pt => { if (pts.includes(pt)) { front.push(pt); (rtxFor[pt] || []).forEach(r => pts.includes(r) && front.push(r)); } });
+  lines[mi] = head.concat(front, pts.filter(pt => !front.includes(pt))).join(' ');
+  return lines.join('\r\n');
+}
 function sdpScreen(sdp){
   const P = PRESETS[S.preset];
   const lines = sdp.split('\r\n');
@@ -829,8 +853,12 @@ function makeScreenTile(name, self){
     const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
     if (fsEl()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
     if (el.classList.contains('fake-fs')) { setFakeFs(el, false); return; }
-    // iPhone: never use Safari's own video player (it freezes in landscape and has pause/skip).
-    // Fill the page ourselves instead. Other devices use normal fullscreen.
+    // iPhone: only Safari's own video player can go truly fullscreen (like YouTube).
+    // iPhones now receive H.264, which that player handles well. Other devices use
+    // normal fullscreen with our own controls.
+    if (IS_IPHONE && v.webkitEnterFullscreen) {
+      try { v.webkitEnterFullscreen(); return; } catch {}
+    }
     const req = el.requestFullscreen || el.webkitRequestFullscreen;
     const canReal = !IS_IPHONE && req && (document.fullscreenEnabled || document.webkitFullscreenEnabled);
     if (!canReal) { setFakeFs(el, true); return; }
