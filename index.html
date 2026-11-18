@@ -869,6 +869,46 @@ function unlockSound(){
   });
 }
 ['pointerdown', 'touchend', 'keydown'].forEach(ev => document.addEventListener(ev, unlockSound, { capture: true, passive: true }));
+
+// iPhone Safari bug: rotating the phone can freeze a live video on its last frame while it
+// still reports "playing", so play() alone doesn't help. After a rotation, check each video
+// for fresh frames and re-attach its stream if it's stuck.
+function refreshVideo(v){
+  const s = v.srcObject; if (!s) return;
+  const muted = v.muted;
+  v.srcObject = null; v.srcObject = s; v.muted = muted;
+  v.play().catch(() => {});
+}
+function gotFrame(v, ms){
+  return new Promise(res => {
+    if (!v.requestVideoFrameCallback) { res(null); return; }
+    let got = false;
+    const id = v.requestVideoFrameCallback(() => { got = true; });
+    setTimeout(() => { if (!got) try { v.cancelVideoFrameCallback(id); } catch {} res(got); }, ms);
+  });
+}
+async function healVideos(){
+  await Promise.all([...document.querySelectorAll('video')].map(async v => {
+    if (!v.srcObject || !v.isConnected) return;
+    if (!v.srcObject.getVideoTracks().some(t => t.readyState === 'live' && !t.muted)) return;
+    if (v.paused) { v.play().catch(() => {}); }
+    const ok = await gotFrame(v, 1200);
+    if (ok !== true) refreshVideo(v);
+  }));
+}
+let lastLandscape = innerWidth > innerHeight, healT1, healT2;
+function onRotate(){
+  const land = innerWidth > innerHeight;
+  if (land === lastLandscape) return;
+  lastLandscape = land;
+  clearTimeout(healT1); clearTimeout(healT2);
+  healT1 = setTimeout(healVideos, 400);
+  healT2 = setTimeout(healVideos, 2200);
+}
+addEventListener('resize', onRotate);
+addEventListener('orientationchange', () => setTimeout(onRotate, 250));
+if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', () => setTimeout(onRotate, 250));
+document.addEventListener('webkitendfullscreen', () => setTimeout(healVideos, 300), true);
 function updateCount(){
   const n = 1 + [...S.peers.values()].filter(p => p.hello).length;
   $('#count').innerHTML = `${n} <span class="t">on the couch</span>`;
