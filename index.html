@@ -873,10 +873,14 @@ function unlockSound(){
 // iPhone Safari bug: rotating the phone can freeze a live video on its last frame while it
 // still reports "playing", so play() alone doesn't help. After a rotation, check each video
 // for fresh frames and re-attach its stream if it's stuck.
+// Re-attach with a brand-new stream object (same live tracks) so Safari rebuilds the
+// video renderer; re-using the same object is ignored by Safari.
 function refreshVideo(v){
   const s = v.srcObject; if (!s) return;
   const muted = v.muted;
-  v.srcObject = null; v.srcObject = s; v.muted = muted;
+  v.srcObject = new MediaStream(s.getTracks());
+  v.muted = muted;
+  if (v._gain) setVol(v, v._vol === undefined ? 1 : v._vol);
   v.play().catch(() => {});
 }
 function gotFrame(v, ms){
@@ -889,18 +893,33 @@ function gotFrame(v, ms){
 }
 async function healVideos(){
   await Promise.all([...document.querySelectorAll('video')].map(async v => {
-    if (!v.srcObject || !v.isConnected) return;
+    if (!v.srcObject || !v.isConnected || v.webkitDisplayingFullscreen) return;
     if (!v.srcObject.getVideoTracks().some(t => t.readyState === 'live' && !t.muted)) return;
     if (v.paused) { v.play().catch(() => {}); }
     const ok = await gotFrame(v, 1200);
     if (ok !== true) refreshVideo(v);
   }));
 }
-let lastLandscape = innerWidth > innerHeight, healT1, healT2;
+// Use the DEVICE orientation: while iPhone's fullscreen player is open the page itself
+// doesn't resize, so comparing window width/height misses the rotation.
+function deviceLandscape(){
+  if (typeof window.orientation === 'number') return Math.abs(window.orientation) === 90;
+  if (screen.orientation && screen.orientation.type) return screen.orientation.type.startsWith('landscape');
+  return innerWidth > innerHeight;
+}
+let lastLandscape = deviceLandscape(), healT1, healT2, fsT1, fsT2;
 function onRotate(){
-  const land = innerWidth > innerHeight;
+  const land = deviceLandscape();
   if (land === lastLandscape) return;
   lastLandscape = land;
+  // iPhone's fullscreen player freezes the picture on rotate (audio keeps going) and the page
+  // can't see that it's frozen, so always rebuild whichever video is in fullscreen.
+  const fsv = [...document.querySelectorAll('video')].filter(v => v.webkitDisplayingFullscreen && v.srcObject);
+  clearTimeout(fsT1); clearTimeout(fsT2);
+  if (fsv.length) {
+    fsT1 = setTimeout(() => fsv.forEach(refreshVideo), 500);
+    fsT2 = setTimeout(() => fsv.forEach(refreshVideo), 1600);
+  }
   clearTimeout(healT1); clearTimeout(healT2);
   healT1 = setTimeout(healVideos, 400);
   healT2 = setTimeout(healVideos, 2200);
