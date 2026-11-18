@@ -234,7 +234,6 @@ aside.chat{grid-row:2/4;grid-column:2;display:flex;flex-direction:column;min-hei
 </div>
 
 <div id="toast" class="hidden"></div>
-<button id="audioGate" class="big primary hidden">🔊 Tap to hear your friends</button>
 
 <script>
 (() => {
@@ -790,16 +789,26 @@ function layout(){
   if (!screensEl.querySelector('.focus')) screensEl.classList.remove('focused');
   if (n <= 1) { screensEl.classList.remove('focused'); screensEl.querySelectorAll('.focus').forEach(t => t.classList.remove('focus')); }
 }
-const gate = $('#audioGate');
+// Sound is on by default. If the browser blocks sound before any tap (phones do this),
+// keep the video playing silently and switch sound on with the very next tap or key press
+// anywhere on the page — no special button needed.
+let soundHinted = false;
 function playOrGate(v){
   if (S.ac && S.ac.state === 'suspended') S.ac.resume().catch(() => {});
-  v.play().catch(() => gate.classList.remove('hidden'));
+  v.play().catch(() => {
+    v.muted = true; v._needsSound = true;
+    v.play().catch(() => {});
+    if (!soundHinted) { soundHinted = true; toast('🔊 Tap anywhere to turn on sound'); }
+  });
 }
-gate.onclick = () => {
-  gate.classList.add('hidden');
-  S.ac && S.ac.resume().catch(() => {});
-  document.querySelectorAll('video').forEach(v => v.play().catch(() => {}));
-};
+function unlockSound(){
+  S.ac && S.ac.state === 'suspended' && S.ac.resume().catch(() => {});
+  document.querySelectorAll('video').forEach(v => {
+    if (v._needsSound) { v._needsSound = false; v.muted = false; }
+    if (v.srcObject && v.paused) v.play().catch(() => {});
+  });
+}
+['pointerdown', 'touchend', 'keydown'].forEach(ev => document.addEventListener(ev, unlockSound, { capture: true, passive: true }));
 function updateCount(){
   const n = 1 + [...S.peers.values()].filter(p => p.hello).length;
   $('#count').innerHTML = `${n} <span class="t">on the couch</span>`;
