@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>The Couch</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="The Couch">
+<link rel="manifest" href="manifest.webmanifest">
 <meta name="description" content="Hop on the couch: share screens, talk, and hang out with your friends.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛋️</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -959,6 +964,7 @@ function updateTile(p){
   t._muted = !p.mic;
 }
 const IS_IPHONE = /iPhone|iPod/.test(navigator.userAgent);
+const IS_HOME_APP = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
 // Phones freeze a live <video> once it fills the screen in landscape (the browser hands it
 // to a special "overlay" display path that breaks with live streams; sound keeps going).
 // While fullscreen we copy each new frame onto a <canvas> and show that instead, which
@@ -982,7 +988,7 @@ function startCanvas(el){
     listen();
     // if frame callbacks stall (stream swapped, browser hiccup), re-subscribe
     clearInterval(el._civ);
-    el._civ = setInterval(() => { if (!alive()) { clearInterval(el._civ); return; } if (performance.now() - last > 600) { draw(); listen(); } }, 600);
+    el._civ = setInterval(() => { if (!alive()) { clearInterval(el._civ); return; } if (v.srcObject && v.paused) v.play().catch(() => {}); if (performance.now() - last > 600) { draw(); listen(); } }, 600);
   } else {
     const loop = () => { if (!alive()) return; draw(); requestAnimationFrame(loop); };
     requestAnimationFrame(loop);
@@ -999,7 +1005,7 @@ function syncCanvases(){
   const real = document.fullscreenElement || document.webkitFullscreenElement;
   document.querySelectorAll('.screen-tile').forEach(t => {
     const fs = t === real || t.classList.contains('fake-fs');
-    if (t._canvasOn) stopCanvas(t); // real video in fullscreen now (canvas kept only as unused helper)
+    if (fs && !t._canvasOn) startCanvas(t); else if (!fs && t._canvasOn) stopCanvas(t);
     const was = t.classList.contains('is-fs');
     t.classList.toggle('is-fs', fs);
     if (fs && !was) pokeUI(t);
@@ -1020,7 +1026,18 @@ function setFakeFs(el, on){
   document.body.classList.toggle('has-fake-fs', on);
   const x = el.querySelector('.fs-exit'); if (x) x.classList.toggle('hidden', !on);
   if (on) window.scrollTo(0, 0);
+  if (on && IS_IPHONE && !IS_HOME_APP) {
+    let shown = homeTipShown;
+    try { shown = shown || sessionStorage.getItem('couch-home-tip') === '1'; } catch {}
+    if (!shown) {
+      homeTipShown = true;
+      try { sessionStorage.setItem('couch-home-tip', '1'); } catch {}
+      toast('For true fullscreen on iPhone: Share → Add to Home Screen, then open The Couch from there 📲');
+    }
+  }
 }
+let homeTipShown = false;
+['resize', 'orientationchange'].forEach(ev => addEventListener(ev, () => setTimeout(syncCanvases, 250)));
 addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.fake-fs').forEach(t => setFakeFs(t, false)); });
 function makeScreenTile(name, self){
   const el = document.createElement('div');
@@ -1039,14 +1056,11 @@ function makeScreenTile(name, self){
     const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
     if (fsEl()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
     if (el.classList.contains('fake-fs')) { setFakeFs(el, false); return; }
-    // iPhone: real fullscreen is only possible through Safari's own player (like YouTube).
-    // Other devices: real fullscreen of the tile. Phones get a fixed-size picture that fits
-    // their screen (see tuneSender), which is what that player needs to stay smooth.
-    if (IS_IPHONE && v.webkitEnterFullscreen) {
-      try { v.webkitEnterFullscreen(); return; } catch {}
-    }
+    // Never use Safari's native player (it freezes live video in landscape). Use real element
+    // fullscreen where the browser supports it, otherwise fill the page (fake-fs). Either way
+    // the picture is drawn through a canvas while fullscreen (see startCanvas/syncCanvases).
     const req = el.requestFullscreen || el.webkitRequestFullscreen;
-    const canReal = !IS_IPHONE && req && (document.fullscreenEnabled || document.webkitFullscreenEnabled);
+    const canReal = req && (document.fullscreenEnabled || document.webkitFullscreenEnabled);
     if (!canReal) { setFakeFs(el, true); return; }
     try {
       const r = req.call(el);
