@@ -627,6 +627,7 @@ function kickPeer(p){
   broadcast({ t: 'kicked', id: p.id, name: p.name });
   S.blocked.add(p.id);
   const name = p.name;
+  p.hello = false; // so their goodbye doesn't also show "left the couch"
   // give the message a moment to arrive, then cut them off on our side too
   setTimeout(() => removePeer(p.id, true), 400);
   sysMsg(`You removed ${name} 🚪`);
