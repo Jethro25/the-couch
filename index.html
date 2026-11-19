@@ -106,6 +106,23 @@ header.top{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:12p
 .tools button{border:0;background:none;font-size:16px;padding:2px 4px}
 .tools input{width:90px;accent-color:var(--pink)}
 @media (hover:none){.tools{opacity:1}}
+/* ---- fullscreen look: picture first, slim controls that fade away (tap to show) ---- */
+.tile.screen-tile.is-fs{cursor:default}
+.tile.screen-tile.is-fs::before,.tile.screen-tile.is-fs::after{content:"";position:absolute;left:0;right:0;height:96px;pointer-events:none;z-index:1;transition:opacity .3s}
+.tile.screen-tile.is-fs::before{top:0;background:linear-gradient(rgba(0,0,0,.6),transparent)}
+.tile.screen-tile.is-fs::after{bottom:0;background:linear-gradient(transparent,rgba(0,0,0,.65))}
+.tile.screen-tile.is-fs .label,.tile.screen-tile.is-fs .stats,.tile.screen-tile.is-fs .tools,.tile.screen-tile.is-fs .fs-exit{z-index:2;transition:opacity .3s;opacity:1}
+.tile.screen-tile.is-fs .label,.tile.screen-tile.is-fs .stats,.tile.screen-tile.is-fs .tools{background:none;backdrop-filter:none;-webkit-backdrop-filter:none;padding:0;border-radius:0}
+.tile.screen-tile.is-fs .fs-exit{width:34px;height:34px;font-size:15px;background:rgba(255,255,255,.14);top:calc(12px + env(safe-area-inset-top));left:calc(14px + env(safe-area-inset-left))}
+.tile.screen-tile.is-fs .label{top:calc(19px + env(safe-area-inset-top));bottom:auto;left:calc(60px + env(safe-area-inset-left));font-size:14px;text-shadow:0 1px 4px rgba(0,0,0,.8);max-width:45%}
+.tile.screen-tile.is-fs .stats{top:calc(20px + env(safe-area-inset-top));right:calc(16px + env(safe-area-inset-right));font-size:11px;color:rgba(255,255,255,.7);text-shadow:0 1px 4px rgba(0,0,0,.8)}
+.tile.screen-tile.is-fs .tools{bottom:calc(12px + env(safe-area-inset-bottom));right:calc(14px + env(safe-area-inset-right));gap:14px}
+.tile.screen-tile.is-fs .tools button{font-size:20px;color:#fff;text-shadow:0 1px 4px rgba(0,0,0,.8)}
+.tile.screen-tile.is-fs .tools span{font-size:16px}
+.tile.screen-tile.is-fs .tools input{width:110px;accent-color:#fff}
+.tile.screen-tile.is-fs.ui-hidden{cursor:none}
+.tile.screen-tile.is-fs.ui-hidden::before,.tile.screen-tile.is-fs.ui-hidden::after,
+.tile.screen-tile.is-fs.ui-hidden .label,.tile.screen-tile.is-fs.ui-hidden .stats,.tile.screen-tile.is-fs.ui-hidden .tools,.tile.screen-tile.is-fs.ui-hidden .fs-exit{opacity:0!important;pointer-events:none}
 .screen-tile canvas.fsv{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:none}
 .screen-tile.canvas-on canvas.fsv{display:block}
 .screen-tile.canvas-on video{position:absolute;left:0;top:0;width:4px!important;height:4px!important;opacity:.01;pointer-events:none}
@@ -946,7 +963,17 @@ function syncCanvases(){
   document.querySelectorAll('.screen-tile').forEach(t => {
     const fs = t === real || t.classList.contains('fake-fs');
     if (fs && !t._canvasOn) startCanvas(t); else if (!fs && t._canvasOn) stopCanvas(t);
+    const was = t.classList.contains('is-fs');
+    t.classList.toggle('is-fs', fs);
+    if (fs && !was) pokeUI(t);
+    if (!fs) { clearTimeout(t._uiT); t.classList.remove('ui-hidden'); }
   });
+}
+// Fullscreen controls: show on tap, fade out after a few seconds (like a video player).
+function pokeUI(el){
+  el.classList.remove('ui-hidden');
+  clearTimeout(el._uiT);
+  el._uiT = setTimeout(() => { if (el.classList.contains('is-fs')) el.classList.add('ui-hidden'); }, 3000);
 }
 document.addEventListener('fullscreenchange', syncCanvases);
 document.addEventListener('webkitfullscreenchange', syncCanvases);
@@ -988,13 +1015,21 @@ function makeScreenTile(name, self){
     setTimeout(() => { if (!fsEl()) setFakeFs(el, true); }, 400);
   };
   el.querySelector('.tools').onclick = e => e.stopPropagation();
+  // any touch on the controls keeps them visible a bit longer
+  ['pointerdown', 'input'].forEach(ev => el.querySelector('.tools').addEventListener(ev, () => { if (el.classList.contains('is-fs')) pokeUI(el); }));
+  el.addEventListener('mousemove', () => { if (el.classList.contains('is-fs') && matchMedia('(hover:hover)').matches) pokeUI(el); });
   el.onclick = () => {
+    if (el.classList.contains('is-fs')) {
+      if (el.classList.contains('ui-hidden')) pokeUI(el);
+      else { clearTimeout(el._uiT); el.classList.add('ui-hidden'); }
+      return;
+    }
     const was = el.classList.contains('focus');
     screensEl.querySelectorAll('.tile').forEach(t => t.classList.remove('focus'));
     if (!was && screensEl.children.length > 1) el.classList.add('focus');
     screensEl.classList.toggle('focused', !was && screensEl.children.length > 1);
   };
-  el.ondblclick = e => { e.stopPropagation(); el.querySelector('.fs-btn').click(); };
+  el.ondblclick = e => { e.stopPropagation(); if (!el.classList.contains('is-fs')) el.querySelector('.fs-btn').click(); };
   screensEl.appendChild(el);
   return el;
 }
