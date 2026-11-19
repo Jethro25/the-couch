@@ -522,7 +522,7 @@ function adopt(conn, outgoing){
   } else { p.conn = conn; p.connOut = outgoing; }
   const opened = () => {
     if (conn._hi) return; conn._hi = true;
-    conn.send({ t: 'hello', name: S.name, color: S.color, mic: S.mic, cam: S.cam });
+    conn.send({ t: 'hello', name: S.name, color: S.color, mic: S.mic, cam: S.cam, dev: myDevice() });
     if (p.conn === conn) { callPeer(id, 'av'); if (S.screen) callPeer(id, 'screen'); }
   };
   conn.on('open', opened);
@@ -542,6 +542,8 @@ function onData(p, d){
       p.name = String(d.name || 'a friend').slice(0, 24);
       p.color = COLORS.includes(d.color) ? d.color : COLORS[0];
       p.mic = !!d.mic; p.cam = !!d.cam;
+      p.dev = cleanDevice(d.dev);
+      if (p.out.screen && p.out.screen.peerConnection) tuneSender(p.out.screen.peerConnection, p);
       ensureTile(p); updateTile(p); updateCount();
       if (first) { sysMsg(`${p.name} hopped on the couch 🛋️`); blip(720); }
       try { p.conn.send({ t: 'roster', peers: openPeerIds() }); } catch {}
@@ -733,18 +735,43 @@ function sdpScreen(sdp){
   return out.join('\r\n');
 }
 
-async function tuneSender(pc){
+// ---- per-device resolution ----
+// Each phone tells the sharer its real screen size in pixels. The sharer then sends that
+// phone a picture that exactly fits its screen (never bigger than the original, never
+// upscaled), with the size LOCKED so it never changes mid-stream: phones' fullscreen
+// players can freeze when a live picture changes size. Computers get the full original.
+function myDevice(){
+  const dpr = window.devicePixelRatio || 1;
+  const a = Math.round(screen.width * dpr), b = Math.round(screen.height * dpr);
+  const mobile = matchMedia('(pointer:coarse)').matches && /Mobi|Android|iPhone|iPad|iPod/.test(navigator.userAgent);
+  return { mobile, long: Math.max(a, b), short: Math.min(a, b) };
+}
+function cleanDevice(d){
+  if (!d || typeof d !== 'object') return null;
+  const long = Math.round(+d.long), short = Math.round(+d.short);
+  if (!(long >= 320 && long <= 8000 && short >= 240 && short <= 8000)) return null;
+  return { mobile: !!d.mobile, long, short };
+}
+function scaleFor(p){
+  if (!p || !p.dev || !p.dev.mobile || !S.screen) return 1;
+  const st = S.screen.getVideoTracks()[0].getSettings();
+  if (!st.width || !st.height) return 1;
+  const srcLong = Math.max(st.width, st.height), srcShort = Math.min(st.width, st.height);
+  return Math.max(1, srcLong / p.dev.long, srcShort / p.dev.short);
+}
+async function tuneSender(pc, p){
   const P = PRESETS[S.preset], M = MODES[S.mode];
+  const phone = !!(p && p.dev && p.dev.mobile);
   for (const s of pc.getSenders()) {
     if (!s.track || s.track.kind !== 'video') continue;
     const prm = s.getParameters();
     if (!prm.encodings || !prm.encodings.length) continue;
     prm.encodings[0].maxBitrate = P.br;
     prm.encodings[0].maxFramerate = P.fps;
-    prm.encodings[0].scaleResolutionDownBy = 1;
+    prm.encodings[0].scaleResolutionDownBy = scaleFor(p);
     prm.encodings[0].priority = 'high';
     prm.encodings[0].networkPriority = 'high';
-    try { prm.degradationPreference = M.deg; } catch {}
+    try { prm.degradationPreference = phone ? 'maintain-resolution' : M.deg; } catch {}
     try { await s.setParameters(prm); }
     catch { try { delete prm.degradationPreference; await s.setParameters(prm); } catch (e) { console.warn('setParameters', e); } }
   }
@@ -755,10 +782,20 @@ function tuneWhenReady(call){
     const pc = call.peerConnection;
     if (++n > 60 || !pc || pc.connectionState === 'closed') { clearInterval(iv); return; }
     if (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
-      clearInterval(iv); tuneSender(pc);
+      clearInterval(iv); tuneSender(pc, S.peers.get(call.peer));
     }
   }, 500);
 }
+// If the sharer switches to a window/screen of a different size, re-fit every phone.
+let lastCapSize = '';
+setInterval(() => {
+  if (!S.screen) { lastCapSize = ''; return; }
+  const st = S.screen.getVideoTracks()[0].getSettings(), k = st.width + 'x' + st.height;
+  if (k === lastCapSize) return;
+  const first = !lastCapSize; lastCapSize = k;
+  if (first) return;
+  for (const p of S.peers.values()) if (p.out.screen && p.out.screen.peerConnection) tuneSender(p.out.screen.peerConnection, p);
+}, 2000);
 
 /* ---------------- local devices ---------------- */
 async function toggleMic(){
@@ -840,7 +877,7 @@ async function applyQuality(){
   const vt = S.screen.getVideoTracks()[0];
   try { vt.contentHint = M.hint; } catch {}
   try { await vt.applyConstraints({ width: { max: P.w }, height: { max: P.h }, frameRate: { ideal: P.fps, max: P.fps } }); } catch {}
-  for (const p of S.peers.values()) if (p.out.screen && p.out.screen.peerConnection) tuneSender(p.out.screen.peerConnection);
+  for (const p of S.peers.values()) if (p.out.screen && p.out.screen.peerConnection) tuneSender(p.out.screen.peerConnection, p);
   toast('Quality updated ✨');
 }
 
@@ -962,7 +999,7 @@ function syncCanvases(){
   const real = document.fullscreenElement || document.webkitFullscreenElement;
   document.querySelectorAll('.screen-tile').forEach(t => {
     const fs = t === real || t.classList.contains('fake-fs');
-    if (fs && !t._canvasOn) startCanvas(t); else if (!fs && t._canvasOn) stopCanvas(t);
+    if (t._canvasOn) stopCanvas(t); // real video in fullscreen now (canvas kept only as unused helper)
     const was = t.classList.contains('is-fs');
     t.classList.toggle('is-fs', fs);
     if (fs && !was) pokeUI(t);
@@ -1002,9 +1039,12 @@ function makeScreenTile(name, self){
     const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
     if (fsEl()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
     if (el.classList.contains('fake-fs')) { setFakeFs(el, false); return; }
-    // iPhone: Safari's own fullscreen player freezes live video in landscape, so fill the page
-    // ourselves. Other devices use real fullscreen. Either way the picture is drawn through a
-    // canvas while fullscreen (see startCanvas).
+    // iPhone: real fullscreen is only possible through Safari's own player (like YouTube).
+    // Other devices: real fullscreen of the tile. Phones get a fixed-size picture that fits
+    // their screen (see tuneSender), which is what that player needs to stay smooth.
+    if (IS_IPHONE && v.webkitEnterFullscreen) {
+      try { v.webkitEnterFullscreen(); return; } catch {}
+    }
     const req = el.requestFullscreen || el.webkitRequestFullscreen;
     const canReal = !IS_IPHONE && req && (document.fullscreenEnabled || document.webkitFullscreenEnabled);
     if (!canReal) { setFakeFs(el, true); return; }
