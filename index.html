@@ -91,6 +91,12 @@ header.top{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:12p
 .tile.cam-on .avatar{display:none}
 .avatar span{width:clamp(44px,32%,96px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;font-family:Fredoka;font-weight:700;font-size:clamp(20px,4vw,38px);color:#21163f;box-shadow:0 6px 20px rgba(0,0,0,.3)}
 .stage.has-screen .people .avatar span{width:48px;font-size:22px}
+.kick{display:none;position:absolute;left:8px;top:8px;z-index:2;border:0;border-radius:999px;padding:4px 10px;background:rgba(255,107,129,.92);color:#2a0d14;font-weight:800;font-size:12px;opacity:0;transition:opacity .15s}
+body.is-host .tile.person:not(.self) .kick{display:block}
+.tile.person:hover .kick,.kick:focus-visible{opacity:1}
+@media (hover:none){.kick{opacity:1}}
+.stage.has-screen .people .kick{padding:2px 7px;font-size:11px}
+.crown{font-size:13px}
 .vol{position:absolute;right:8px;top:8px;display:flex;align-items:center;gap:4px;background:rgba(20,14,38,.75);padding:3px 8px 3px 4px;border-radius:999px;backdrop-filter:blur(6px);z-index:2;opacity:0;transition:opacity .15s}
 .tile.person:hover .vol,.vol:focus-within,.vol.muted{opacity:1}
 @media (hover:none){.vol{opacity:1}}
@@ -130,7 +136,8 @@ header.top{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:12p
 .tile.screen-tile.is-fs.ui-hidden .label,.tile.screen-tile.is-fs.ui-hidden .stats,.tile.screen-tile.is-fs.ui-hidden .tools,.tile.screen-tile.is-fs.ui-hidden .fs-exit{opacity:0!important;pointer-events:none}
 .screen-tile canvas.fsv{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:none}
 .screen-tile.canvas-on canvas.fsv{display:block}
-.screen-tile.canvas-on video{position:absolute;left:0;top:0;width:4px!important;height:4px!important;opacity:.01;pointer-events:none}
+/* the video stays full size underneath (so the phone keeps playing it normally); the canvas sits on top */
+.screen-tile canvas.fsv{z-index:0}
 .screen-tile.fake-fs canvas.fsv{box-sizing:border-box;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
 .screen-tile.fake-fs{position:fixed;inset:0;z-index:100;border-radius:0;border:0;height:100dvh;width:100vw;cursor:default;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
 .screen-tile.fake-fs .tools{opacity:1;bottom:calc(14px + env(safe-area-inset-bottom));right:calc(10px + env(safe-area-inset-right))}
@@ -311,7 +318,8 @@ const S = {
   ac: null, silentAudio: null, blackVideo: null,
   micTrack: null, camTrack: null, mic: false, cam: false,
   screen: null, preset: 'ultra', mode: 'auto',
-  unread: 0, selfTile: null, selfScreenTile: null
+  unread: 0, selfTile: null, selfScreenTile: null,
+  hostId: '', blocked: new Set()
 };
 
 /* ---------------- storage helpers ---------------- */
@@ -326,6 +334,10 @@ nameIn.value = store.get('couch-name') || `${cap(pick(ADJ))} ${cap(pick(NOUN))}`
 $('#rollName').onclick = () => { nameIn.value = `${cap(pick(ADJ))} ${cap(pick(NOUN))}`; };
 const qsRoom = new URLSearchParams(location.search).get('room');
 if (qsRoom) { codeIn.value = qsRoom; $('#joinBtn').focus(); }
+const qsKicked = new URLSearchParams(location.search).get('kicked');
+if (qsKicked) { err.textContent = `The host removed you from "${qsKicked}".`; history.replaceState(null, '', location.pathname); }
+const KICK_BAN_MS = 60 * 60 * 1000; // a removed person can't rejoin that room for an hour
+const wasKicked = code => { const t = +store.get('couch-kicked:' + code); return t && Date.now() - t < KICK_BAN_MS; };
 
 const makeCode = () => `${pick(ADJ)}-${pick(NOUN)}-${Math.floor(10 + Math.random() * 90)}`;
 function normCode(v){
@@ -339,6 +351,7 @@ $('#createBtn').onclick = () => go(makeCode(), true);
 $('#joinBtn').onclick = () => {
   const c = normCode(codeIn.value);
   if (!c) { err.textContent = 'Pop in a room code first!'; codeIn.focus(); return; }
+  if (wasKicked(c)) { err.textContent = 'The host removed you from this couch. Ask them for a fresh invite later.'; return; }
   go(c, false);
 };
 codeIn.addEventListener('keydown', e => { if (e.key === 'Enter') $('#joinBtn').click(); });
@@ -448,6 +461,11 @@ function claimBeacon(code){
     const t = setTimeout(() => { try { b.destroy(); } catch {} fin(false); }, 10000);
     b.on('open', () => {
       S.beacon = b;
+      // whoever holds the room code is the host (the creator, or the next person if they leave)
+      const wasHost = S.hostId === S.myId;
+      S.hostId = S.myId;
+      if (!wasHost && S.joined) { broadcast({ t: 'host' }); sysMsg('You are now the host 👑'); }
+      updateHostUI();
       b.on('connection', c => {
         c.on('open', () => {
           c.send({ t: 'roster', peers: [S.myId, ...openPeerIds()] });
@@ -489,6 +507,7 @@ function knock(code){
       if (done || !d || d.t !== 'roster' || !Array.isArray(d.peers)) return;
       done = true; clearTimeout(t); S.peer.off('error', onErr);
       try { c.close(); } catch {}
+      if (typeof d.peers[0] === 'string') S.hostId = d.peers[0]; // the room-code holder lists itself first
       d.peers.forEach(connectTo);
       res();
     });
@@ -508,7 +527,7 @@ function getPeer(id){
 const openPeerIds = () => [...S.peers.values()].filter(p => p.conn && p.conn.open).map(p => p.id);
 
 function connectTo(id){
-  if (typeof id !== 'string' || id === S.myId || id.startsWith(PREFIX)) return;
+  if (typeof id !== 'string' || id === S.myId || id.startsWith(PREFIX) || S.blocked.has(id)) return;
   const ex = S.peers.get(id);
   if (ex && ex.conn) return;
   adopt(S.peer.connect(id, { reliable: true }), true);
@@ -516,7 +535,7 @@ function connectTo(id){
 
 function adopt(conn, outgoing){
   const id = conn.peer;
-  if (id.startsWith(PREFIX)) { conn.close(); return; }
+  if (id.startsWith(PREFIX) || S.blocked.has(id)) { conn.close(); return; }
   const p = getPeer(id);
   if (p.conn && p.conn !== conn) {
     // Both sides dialed at once: keep the connection started by the smaller id.
@@ -570,12 +589,53 @@ function onData(p, d){
       break;
     }
     case 'bye': removePeer(p.id); break;
+    case 'host':
+      // the old host left and this person picked up the room code
+      if (S.hostId !== p.id && (!S.hostId || !S.peers.has(S.hostId) || !S.peers.get(S.hostId).conn?.open)) {
+        S.hostId = p.id; updateHostUI(); sysMsg(`${p.name} is now the host 👑`);
+      }
+      break;
+    case 'kick':
+      // only the host can remove people
+      if (p.id !== S.hostId) break;
+      store.set('couch-kicked:' + S.room, String(Date.now()));
+      teardown();
+      location.href = location.pathname + '?kicked=' + encodeURIComponent(S.room);
+      break;
+    case 'kicked': {
+      if (p.id !== S.hostId || typeof d.id !== 'string' || d.id === S.myId) break;
+      S.blocked.add(d.id);
+      const k = S.peers.get(d.id);
+      const name = k ? k.name : String(d.name || 'Someone').slice(0, 24);
+      removePeer(d.id, true);
+      sysMsg(`${name} was removed by the host 🚪`);
+      break;
+    }
   }
 }
 
-function removePeer(id){
+// ---- host tools ----
+function updateHostUI(){
+  document.body.classList.toggle('is-host', !!S.myId && S.hostId === S.myId);
+  for (const p of S.peers.values()) if (p.tile) p.tile.querySelector('.crown').classList.toggle('hidden', p.id !== S.hostId);
+  if (S.selfTile) S.selfTile.querySelector('.crown').classList.toggle('hidden', S.hostId !== S.myId);
+}
+function kickPeer(p){
+  if (S.hostId !== S.myId || !p) return;
+  if (!confirm(`Remove ${p.name} from the couch?`)) return;
+  try { p.conn && p.conn.open && p.conn.send({ t: 'kick' }); } catch {}
+  broadcast({ t: 'kicked', id: p.id, name: p.name });
+  S.blocked.add(p.id);
+  const name = p.name;
+  // give the message a moment to arrive, then cut them off on our side too
+  setTimeout(() => removePeer(p.id, true), 400);
+  sysMsg(`You removed ${name} 🚪`);
+}
+
+function removePeer(id, quiet){
   const p = S.peers.get(id);
   if (!p) return;
+  if (quiet) p.hello = false;
   S.peers.delete(id);
   for (const k of ['av', 'screen']) {
     try { p.in[k] && p.in[k].close(); } catch {}
@@ -670,6 +730,7 @@ setInterval(async () => {
 
 function onCall(call){
   const kind = call.metadata && call.metadata.kind === 'screen' ? 'screen' : 'av';
+  if (S.blocked.has(call.peer)) { try { call.close(); } catch {} return; }
   const p = getPeer(call.peer);
   call.answer(undefined, { sdpTransform: sdp => {
     if (kind === 'screen') sdp = sdpScreen(sdp);
@@ -891,8 +952,9 @@ const peopleEl = $('#people'), screensEl = $('#screens'), stage = $('#stage');
 function personTile(name, color, self){
   const el = document.createElement('div');
   el.className = 'tile person' + (self ? ' self' : '');
-  el.innerHTML = '<video playsinline autoplay></video><div class="avatar"><span></span></div><div class="label"><span class="mic">🔇</span><span class="nm"></span></div>' +
-    (self ? '' : '<div class="vol"><button class="vbtn" title="Mute for me">🔊</button><input type="range" min="0" max="1" step="0.05" value="1" title="Volume (only for you)"><span class="vpct">100%</span></div>');
+  el.innerHTML = '<video playsinline autoplay></video><div class="avatar"><span></span></div><div class="label"><span class="mic">🔇</span><span class="nm"></span><span class="crown hidden" title="Host">👑</span></div>' +
+    (self ? '' : '<div class="vol"><button class="vbtn" title="Mute for me">🔊</button><input type="range" min="0" max="1" step="0.05" value="1" title="Volume (only for you)"><span class="vpct">100%</span></div>' +
+      '<button class="kick" title="Remove from the couch">🚪 Kick</button>');
   if (self) el.querySelector('video').muted = true;
   else wireVolume(el, el.querySelector('video'));
   setTileName(el, name, color);
@@ -954,7 +1016,14 @@ function restoreVol(tile, name){
   if (!isNaN(saved) && saved >= 0 && saved <= 1) tile._applyVol(saved);
 }
 
-function ensureTile(p){ if (!p.tile) p.tile = personTile(p.name, p.color, false); return p.tile; }
+function ensureTile(p){
+  if (!p.tile) {
+    p.tile = personTile(p.name, p.color, false);
+    p.tile.querySelector('.kick').onclick = e => { e.stopPropagation(); kickPeer(p); };
+    updateHostUI();
+  }
+  return p.tile;
+}
 function updateTile(p){
   const t = ensureTile(p);
   setTileName(t, p.name, p.color);
@@ -964,7 +1033,6 @@ function updateTile(p){
   t._muted = !p.mic;
 }
 const IS_IPHONE = /iPhone|iPod/.test(navigator.userAgent);
-const IS_HOME_APP = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
 // Phones freeze a live <video> once it fills the screen in landscape (the browser hands it
 // to a special "overlay" display path that breaks with live streams; sound keeps going).
 // While fullscreen we copy each new frame onto a <canvas> and show that instead, which
@@ -982,6 +1050,46 @@ function startCanvas(el){
     try { g.drawImage(v, 0, 0, c.width, c.height); last = performance.now(); } catch {}
   };
   const alive = () => el._canvasOn && el._cgen === gen && el.isConnected;
+  el.classList.add('canvas-on');
+  // Best path (Chrome / Android): read decoded frames straight from the stream itself, so the
+  // fullscreen picture doesn't depend on how the phone paints the <video> element at all.
+  if (window.MediaStreamTrackProcessor && window.VideoFrame) {
+    let reader = null, clone = null, srcId = '';
+    const stopReader = () => { try { reader && reader.cancel(); } catch {} try { clone && clone.stop(); } catch {} reader = null; clone = null; };
+    const begin = () => {
+      stopReader();
+      const tr = v.srcObject && v.srcObject.getVideoTracks()[0];
+      if (!tr) return;
+      srcId = tr.id; clone = tr.clone();
+      let r;
+      try { r = reader = new MediaStreamTrackProcessor({ track: clone }).readable.getReader(); }
+      catch { stopReader(); return; }
+      (async () => {
+        while (alive() && r === reader) {
+          let res; try { res = await r.read(); } catch { break; }
+          if (res.done) break;
+          const f = res.value;
+          try {
+            if (alive()) {
+              const w = f.displayWidth, h = f.displayHeight;
+              if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+              g.drawImage(f, 0, 0, w, h);
+            }
+          } catch {} finally { f.close(); }
+        }
+      })();
+    };
+    begin();
+    el._cstop = stopReader;
+    clearInterval(el._civ);
+    el._civ = setInterval(() => {
+      if (!alive()) { clearInterval(el._civ); stopReader(); return; }
+      if (v.srcObject && v.paused) v.play().catch(() => {});
+      const tr = v.srcObject && v.srcObject.getVideoTracks()[0];
+      if (tr && (tr.id !== srcId || !reader)) begin(); // stream was refreshed: follow the new one
+    }, 600);
+    return;
+  }
   if (v.requestVideoFrameCallback) {
     let sub = 0;
     const listen = () => { const my = ++sub; v.requestVideoFrameCallback(() => { if (!alive() || my !== sub) return; draw(); listen(); }); };
@@ -994,10 +1102,10 @@ function startCanvas(el){
     requestAnimationFrame(loop);
   }
   draw();
-  el.classList.add('canvas-on');
 }
 function stopCanvas(el){
   el._canvasOn = false; clearInterval(el._civ);
+  if (el._cstop) { el._cstop(); el._cstop = null; }
   el.classList.remove('canvas-on');
   const v = el.querySelector('video'); if (v && v.srcObject && v.paused) v.play().catch(() => {});
 }
@@ -1026,17 +1134,7 @@ function setFakeFs(el, on){
   document.body.classList.toggle('has-fake-fs', on);
   const x = el.querySelector('.fs-exit'); if (x) x.classList.toggle('hidden', !on);
   if (on) window.scrollTo(0, 0);
-  if (on && IS_IPHONE && !IS_HOME_APP) {
-    let shown = homeTipShown;
-    try { shown = shown || sessionStorage.getItem('couch-home-tip') === '1'; } catch {}
-    if (!shown) {
-      homeTipShown = true;
-      try { sessionStorage.setItem('couch-home-tip', '1'); } catch {}
-      toast('For true fullscreen on iPhone: Share → Add to Home Screen, then open The Couch from there 📲');
-    }
-  }
 }
-let homeTipShown = false;
 ['resize', 'orientationchange'].forEach(ev => addEventListener(ev, () => setTimeout(syncCanvases, 250)));
 addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.fake-fs').forEach(t => setFakeFs(t, false)); });
 function makeScreenTile(name, self){
@@ -1056,9 +1154,12 @@ function makeScreenTile(name, self){
     const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
     if (fsEl()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
     if (el.classList.contains('fake-fs')) { setFakeFs(el, false); return; }
-    // Never use Safari's native player (it freezes live video in landscape). Use real element
-    // fullscreen where the browser supports it, otherwise fill the page (fake-fs). Either way
-    // the picture is drawn through a canvas while fullscreen (see startCanvas/syncCanvases).
+    // iPhone (Safari or Home Screen app): real fullscreen through Safari's own player.
+    // Everywhere else: real element fullscreen (or fill the page if that's unsupported),
+    // drawn through a canvas while fullscreen (see startCanvas/syncCanvases).
+    if (IS_IPHONE && v.webkitEnterFullscreen) {
+      try { v.webkitEnterFullscreen(); return; } catch {}
+    }
     const req = el.requestFullscreen || el.webkitRequestFullscreen;
     const canReal = req && (document.fullscreenEnabled || document.webkitFullscreenEnabled);
     if (!canReal) { setFakeFs(el, true); return; }
@@ -1262,6 +1363,7 @@ function enterRoom(){
   history.replaceState(null, '', location.pathname + '?room=' + encodeURIComponent(S.room));
   S.selfTile = personTile(S.name + ' (you)', S.color, true);
   S.selfTile._muted = true;
+  updateHostUI();
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) { $('#shareBtn').classList.add('hidden'); $('#qualBtn').classList.add('hidden'); }
   if (innerWidth <= 820) setChat(false); else setChat(true);
   sysMsg(S.beacon && !S.peers.size ? `You started the couch! Send the invite to your friends 💌` : `Welcome in, ${S.name} 🛋️`);
