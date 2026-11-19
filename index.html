@@ -106,6 +106,10 @@ header.top{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:12p
 .tools button{border:0;background:none;font-size:16px;padding:2px 4px}
 .tools input{width:90px;accent-color:var(--pink)}
 @media (hover:none){.tools{opacity:1}}
+.screen-tile canvas.fsv{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000;display:none}
+.screen-tile.canvas-on canvas.fsv{display:block}
+.screen-tile.canvas-on video{position:absolute;left:0;top:0;width:4px!important;height:4px!important;opacity:.01;pointer-events:none}
+.screen-tile.fake-fs canvas.fsv{top:env(safe-area-inset-top);bottom:env(safe-area-inset-bottom);left:env(safe-area-inset-left);right:env(safe-area-inset-right);width:auto;height:auto}
 .screen-tile.fake-fs{position:fixed;inset:0;z-index:100;border-radius:0;border:0;height:100dvh;width:100vw;cursor:default;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
 .screen-tile.fake-fs .tools{opacity:1;bottom:calc(14px + env(safe-area-inset-bottom));right:calc(10px + env(safe-area-inset-right))}
 .screen-tile.fake-fs .label{bottom:calc(14px + env(safe-area-inset-bottom));left:calc(10px + env(safe-area-inset-left))}
@@ -901,8 +905,54 @@ function updateTile(p){
   t._muted = !p.mic;
 }
 const IS_IPHONE = /iPhone|iPod/.test(navigator.userAgent);
+// Phones freeze a live <video> once it fills the screen in landscape (the browser hands it
+// to a special "overlay" display path that breaks with live streams; sound keeps going).
+// While fullscreen we copy each new frame onto a <canvas> and show that instead, which
+// always uses the normal display path. Outside fullscreen the plain video is shown.
+function startCanvas(el){
+  const v = el.querySelector('video');
+  let c = el.querySelector('canvas.fsv');
+  if (!c) { c = document.createElement('canvas'); c.className = 'fsv'; v.after(c); }
+  const g = c.getContext('2d', { alpha: false });
+  const gen = (el._cgen || 0) + 1; el._cgen = gen; el._canvasOn = true;
+  let last = 0;
+  const draw = () => {
+    if (!v.videoWidth) return;
+    if (c.width !== v.videoWidth || c.height !== v.videoHeight) { c.width = v.videoWidth; c.height = v.videoHeight; }
+    try { g.drawImage(v, 0, 0, c.width, c.height); last = performance.now(); } catch {}
+  };
+  const alive = () => el._canvasOn && el._cgen === gen && el.isConnected;
+  if (v.requestVideoFrameCallback) {
+    let sub = 0;
+    const listen = () => { const my = ++sub; v.requestVideoFrameCallback(() => { if (!alive() || my !== sub) return; draw(); listen(); }); };
+    listen();
+    // if frame callbacks stall (stream swapped, browser hiccup), re-subscribe
+    clearInterval(el._civ);
+    el._civ = setInterval(() => { if (!alive()) { clearInterval(el._civ); return; } if (performance.now() - last > 600) { draw(); listen(); } }, 600);
+  } else {
+    const loop = () => { if (!alive()) return; draw(); requestAnimationFrame(loop); };
+    requestAnimationFrame(loop);
+  }
+  draw();
+  el.classList.add('canvas-on');
+}
+function stopCanvas(el){
+  el._canvasOn = false; clearInterval(el._civ);
+  el.classList.remove('canvas-on');
+  const v = el.querySelector('video'); if (v && v.srcObject && v.paused) v.play().catch(() => {});
+}
+function syncCanvases(){
+  const real = document.fullscreenElement || document.webkitFullscreenElement;
+  document.querySelectorAll('.screen-tile').forEach(t => {
+    const fs = t === real || t.classList.contains('fake-fs');
+    if (fs && !t._canvasOn) startCanvas(t); else if (!fs && t._canvasOn) stopCanvas(t);
+  });
+}
+document.addEventListener('fullscreenchange', syncCanvases);
+document.addEventListener('webkitfullscreenchange', syncCanvases);
 function setFakeFs(el, on){
   el.classList.toggle('fake-fs', on);
+  setTimeout(syncCanvases, 0);
   document.body.classList.toggle('has-fake-fs', on);
   const x = el.querySelector('.fs-exit'); if (x) x.classList.toggle('hidden', !on);
   if (on) window.scrollTo(0, 0);
@@ -925,12 +975,9 @@ function makeScreenTile(name, self){
     const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
     if (fsEl()) { (document.exitFullscreen || document.webkitExitFullscreen).call(document); return; }
     if (el.classList.contains('fake-fs')) { setFakeFs(el, false); return; }
-    // iPhone: only Safari's own video player can go truly fullscreen (like YouTube).
-    // iPhones now receive H.264, which that player handles well. Other devices use
-    // normal fullscreen with our own controls.
-    if (IS_IPHONE && v.webkitEnterFullscreen) {
-      try { v.webkitEnterFullscreen(); return; } catch {}
-    }
+    // iPhone: Safari's own fullscreen player freezes live video in landscape, so fill the page
+    // ourselves. Other devices use real fullscreen. Either way the picture is drawn through a
+    // canvas while fullscreen (see startCanvas).
     const req = el.requestFullscreen || el.webkitRequestFullscreen;
     const canReal = !IS_IPHONE && req && (document.fullscreenEnabled || document.webkitFullscreenEnabled);
     if (!canReal) { setFakeFs(el, true); return; }
