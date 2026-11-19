@@ -759,10 +759,14 @@ function swapOut(kind, track){
 }
 
 // Raise bitrate ceilings so screen shares can reach full quality.
-// Every viewer asks for H.264: hardware-decoded on nearly all phones and computers, and what
-// iPhone's fullscreen player is built for. If a device can't do H.264 it falls back to VP8
-// automatically. Add ?codec=vp8 to the URL to opt out (for testing).
-const USE_H264 = new URLSearchParams(location.search).get('codec') !== 'vp8';
+// Codec per viewer:
+//  - iPhone/iPad and computers ask for H.264 (what iPhone's fullscreen player is built for).
+//  - Android stays on VP8: Android's hardware H.264 decoder in Chrome can stall when the
+//    screen goes fullscreen/landscape, while VP8 is Chrome's own, well-tested decoder.
+// URL overrides for testing: ?codec=vp8 or ?codec=h264.
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+const CODEC_PARAM = new URLSearchParams(location.search).get('codec');
+const USE_H264 = CODEC_PARAM === 'h264' || (CODEC_PARAM !== 'vp8' && !IS_ANDROID);
 function preferH264(sdp){
   const lines = sdp.split('\r\n');
   const mi = lines.findIndex(l => l.startsWith('m=video'));
