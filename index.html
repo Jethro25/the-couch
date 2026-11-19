@@ -531,6 +531,16 @@ function onData(p, d){
     case 'chat': if (typeof d.text === 'string' && d.text.trim()) { addMsg(p.name, p.color, d.text.slice(0, 800), false); blip(880); } break;
     case 'react': if (EMOJIS.includes(d.e)) floatEmoji(d.e, p.name); break;
     case 'stop': if (d.kind === 'screen') dropIn(p, 'screen'); break;
+    case 'refresh': {
+      // a friend's picture froze: send them a fresh stream (rate-limited)
+      const k = d.kind === 'screen' ? 'screen' : 'av';
+      p.sentRefresh = p.sentRefresh || {};
+      if (Date.now() - (p.sentRefresh[k] || 0) < 3000) break;
+      p.sentRefresh[k] = Date.now();
+      if (k === 'screen' && !S.screen) break;
+      callPeer(p.id, k, true);
+      break;
+    }
     case 'bye': removePeer(p.id); break;
   }
 }
@@ -556,19 +566,79 @@ function broadcast(obj){
 }
 
 /* ---------------- media calls ---------------- */
-function callPeer(id, kind){
+// overlap=true (a viewer asked for a fresh stream): keep the old call alive until the new one
+// connects, so the viewer's tile and fullscreen never disappear during the swap.
+function callPeer(id, kind, overlap){
   const p = S.peers.get(id);
   if (!p || !S.peer) return;
-  if (p.out[kind]) { try { p.out[kind].close(); } catch {} p.out[kind] = null; }
+  const old = p.out[kind]; p.out[kind] = null;
+  const closeOld = () => { if (old) try { old.close(); } catch {} };
   let stream;
   if (kind === 'av') stream = new MediaStream([S.micTrack || S.silentAudio, S.camTrack || S.blackVideo]);
-  else { stream = S.screen; if (!stream) return; }
+  else { stream = S.screen; if (!stream) { closeOld(); return; } }
   const call = S.peer.call(id, stream, { metadata: { kind }, sdpTransform: kind === 'screen' ? sdpScreen : undefined });
-  if (!call) return;
+  if (!call) { closeOld(); return; }
   p.out[kind] = call;
   call.on('error', () => {});
   if (kind === 'screen') tuneWhenReady(call);
+  if (!old) return;
+  if (!overlap) { closeOld(); return; }
+  let n = 0;
+  const iv = setInterval(() => {
+    const pc = call.peerConnection;
+    const up = pc && (pc.connectionState === 'connected' || pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed');
+    if (up || ++n > 30) { clearInterval(iv); setTimeout(closeOld, up ? 1500 : 0); }
+  }, 500);
 }
+
+/* ---------------- freeze recovery ----------------
+   Phones sometimes stop showing new frames (e.g. after fullscreen or rotating) because the
+   video decoder is waiting for a fresh full frame. A brand-new stream always starts with one,
+   so a stuck viewer asks the sharer to re-send just to them. */
+function requestRefresh(p, kind, manual){
+  if (!p || !p.conn || !p.conn.open) return;
+  p.lastRefresh = p.lastRefresh || {};
+  if (!manual && Date.now() - (p.lastRefresh[kind] || 0) < 8000) return;
+  p.lastRefresh[kind] = Date.now();
+  try { p.conn.send({ t: 'refresh', kind }); } catch {}
+  if (manual) toast('Refreshing the stream… ✨');
+}
+function trackFrames(v){
+  if (v._fcb || !v.requestVideoFrameCallback) return;
+  v._fcb = true; v._frames = 0;
+  const tick = () => { v._frames++; v.requestVideoFrameCallback(tick); };
+  v.requestVideoFrameCallback(tick);
+}
+const visibleOnScreen = v => document.visibilityState === 'visible' &&
+  (v.webkitDisplayingFullscreen || (v.offsetParent !== null && v.offsetWidth > 0 && getComputedStyle(v).display !== 'none'));
+setInterval(async () => {
+  for (const p of S.peers.values()) {
+    for (const kind of ['screen', 'av']) {
+      const call = p.in[kind];
+      const tile = kind === 'screen' ? p.screenTile : p.tile;
+      if (!call || !tile || !call.peerConnection) continue;
+      if (kind === 'av' && !p.cam) continue;
+      const v = tile.querySelector('video');
+      if (!v || !v.srcObject) continue;
+      trackFrames(v);
+      let r = null;
+      try { (await call.peerConnection.getStats()).forEach(x => { if (x.type === 'inbound-rtp' && x.kind === 'video') r = x; }); } catch { continue; }
+      if (!r) continue;
+      const w = v._watch || (v._watch = { stuck: 0 });
+      if (w.call === call && w.bytes !== undefined) {
+        const bytes = r.bytesReceived - w.bytes;            // real video data arriving (padding excluded)
+        const decoded = (r.framesDecoded || 0) - w.decoded; // frames the decoder produced
+        const shown = v._frames - w.shown;                  // frames actually painted
+        const flowing = bytes > 15000;
+        const decoderStuck = flowing && decoded === 0;
+        const painterStuck = flowing && decoded > 0 && v.requestVideoFrameCallback && !v.webkitDisplayingFullscreen && visibleOnScreen(v) && shown === 0;
+        w.stuck = (decoderStuck || painterStuck) ? w.stuck + 1 : 0;
+        if (w.stuck >= 2) { w.stuck = 0; if (!v.paused) requestRefresh(p, kind); else v.play().catch(() => {}); }
+      }
+      Object.assign(w, { call, bytes: r.bytesReceived, decoded: r.framesDecoded || 0, shown: v._frames || 0 });
+    }
+  }
+}, 1000);
 
 function onCall(call){
   const kind = call.metadata && call.metadata.kind === 'screen' ? 'screen' : 'av';
@@ -843,7 +913,9 @@ function makeScreenTile(name, self){
   el.className = 'tile screen-tile';
   el.innerHTML = `<video playsinline autoplay></video><div class="label">🖥️ <span class="nm"></span></div><div class="stats"></div>
     <button class="fs-exit hidden" title="Exit fullscreen">✕</button>
-    <div class="tools">${self ? '' : '<span>🔊</span><input type="range" min="0" max="1" step="0.05" value="1" title="Volume">'}<button class="fs-btn" title="Fullscreen">⛶</button></div>`;
+    <div class="tools">${self ? '' : '<button class="rf-btn" title="Picture stuck? Get a fresh stream">↻</button><span>🔊</span><input type="range" min="0" max="1" step="0.05" value="1" title="Volume">'}<button class="fs-btn" title="Fullscreen">⛶</button></div>`;
+  const rf = el.querySelector('.rf-btn');
+  if (rf) rf.onclick = e => { e.stopPropagation(); requestRefresh(el._peer, 'screen', true); };
   el.querySelector('.nm').textContent = self ? "your screen" : `${name}'s screen`;
   const v = el.querySelector('video');
   const vol = el.querySelector('input'); if (vol) { vol.oninput = () => setVol(v, +vol.value); vol.onclick = e => e.stopPropagation(); }
@@ -886,6 +958,7 @@ function attachIn(p, kind, stream){
     if (v.srcObject !== stream) { v.srcObject = stream; reapplyVol(v); playOrGate(v); watchLevel(stream, t); }
   } else {
     if (!p.screenTile) { p.screenTile = makeScreenTile(p.name, false); blip(990); }
+    p.screenTile._peer = p;
     const v = p.screenTile.querySelector('video');
     if (v.srcObject !== stream) { v.srcObject = stream; reapplyVol(v); playOrGate(v); }
     p.screenTile.querySelector('.nm').textContent = `${p.name}'s screen`;
@@ -927,64 +1000,6 @@ function unlockSound(){
 }
 ['pointerdown', 'touchend', 'keydown'].forEach(ev => document.addEventListener(ev, unlockSound, { capture: true, passive: true }));
 
-// iPhone Safari bug: rotating the phone can freeze a live video on its last frame while it
-// still reports "playing", so play() alone doesn't help. After a rotation, check each video
-// for fresh frames and re-attach its stream if it's stuck.
-// Re-attach with a brand-new stream object (same live tracks) so Safari rebuilds the
-// video renderer; re-using the same object is ignored by Safari.
-function refreshVideo(v){
-  const s = v.srcObject; if (!s) return;
-  const muted = v.muted;
-  v.srcObject = new MediaStream(s.getTracks());
-  v.muted = muted;
-  if (v._gain) setVol(v, v._vol === undefined ? 1 : v._vol);
-  v.play().catch(() => {});
-}
-function gotFrame(v, ms){
-  return new Promise(res => {
-    if (!v.requestVideoFrameCallback) { res(null); return; }
-    let got = false;
-    const id = v.requestVideoFrameCallback(() => { got = true; });
-    setTimeout(() => { if (!got) try { v.cancelVideoFrameCallback(id); } catch {} res(got); }, ms);
-  });
-}
-async function healVideos(){
-  await Promise.all([...document.querySelectorAll('video')].map(async v => {
-    if (!v.srcObject || !v.isConnected || v.webkitDisplayingFullscreen) return;
-    if (!v.srcObject.getVideoTracks().some(t => t.readyState === 'live' && !t.muted)) return;
-    if (v.paused) { v.play().catch(() => {}); }
-    const ok = await gotFrame(v, 1200);
-    if (ok !== true) refreshVideo(v);
-  }));
-}
-// Use the DEVICE orientation: while iPhone's fullscreen player is open the page itself
-// doesn't resize, so comparing window width/height misses the rotation.
-function deviceLandscape(){
-  if (typeof window.orientation === 'number') return Math.abs(window.orientation) === 90;
-  if (screen.orientation && screen.orientation.type) return screen.orientation.type.startsWith('landscape');
-  return innerWidth > innerHeight;
-}
-let lastLandscape = deviceLandscape(), healT1, healT2, fsT1, fsT2;
-function onRotate(){
-  const land = deviceLandscape();
-  if (land === lastLandscape) return;
-  lastLandscape = land;
-  // iPhone's fullscreen player freezes the picture on rotate (audio keeps going) and the page
-  // can't see that it's frozen, so always rebuild whichever video is in fullscreen.
-  const fsv = [...document.querySelectorAll('video')].filter(v => v.webkitDisplayingFullscreen && v.srcObject);
-  clearTimeout(fsT1); clearTimeout(fsT2);
-  if (fsv.length) {
-    fsT1 = setTimeout(() => fsv.forEach(refreshVideo), 500);
-    fsT2 = setTimeout(() => fsv.forEach(refreshVideo), 1600);
-  }
-  clearTimeout(healT1); clearTimeout(healT2);
-  healT1 = setTimeout(healVideos, 400);
-  healT2 = setTimeout(healVideos, 2200);
-}
-addEventListener('resize', onRotate);
-addEventListener('orientationchange', () => setTimeout(onRotate, 250));
-if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', () => setTimeout(onRotate, 250));
-document.addEventListener('webkitendfullscreen', () => setTimeout(healVideos, 300), true);
 function updateCount(){
   const n = 1 + [...S.peers.values()].filter(p => p.hello).length;
   $('#count').innerHTML = `${n} <span class="t">on the couch</span>`;
